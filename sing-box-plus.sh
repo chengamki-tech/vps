@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # ============================================================
 #  Sing-Box-Plus 管理脚本（18 节点：直连 9 + WARP 9）
-#  Version: v3.2.0
+#  Version: v3.3.0
 #  author：Alvin9999
-#  Repo: https://github.com/Alvin9999-newpac/Sing-Box-Plus
+#  Repo: https://github.com/chengamki-tech/vps
 # ============================================================
 
 set -Eeuo pipefail
 
-stty erase ^H # 让退格键在终端里正常工作
+stty erase ^H 2>/dev/null || true # 让退格键在终端里正常工作
 # ===== [BEGIN] SBP 引导模块 v2.2.0+（包管理器优先 + 二进制回退） =====
 # 模式与哨兵
 : "${SBP_SOFT:=0}"                               # 1=宽松模式（失败尽量继续），默认 0=严格
@@ -284,9 +284,32 @@ ENABLE_SS2022=${ENABLE_SS2022:-true}
 ENABLE_SS=${ENABLE_SS:-true}
 ENABLE_TUIC=${ENABLE_TUIC:-true}
 
+# 落地出口（可选）：入口 VPS -> SOCKS5 落地代理 -> 目标网站
+ENABLE_LANDING=${ENABLE_LANDING:-false}
+LANDING_TYPE=${LANDING_TYPE:-socks}
+LANDING_HOST=${LANDING_HOST:-}
+LANDING_PORT=${LANDING_PORT:-}
+LANDING_USERNAME=${LANDING_USERNAME:-}
+LANDING_PASSWORD=${LANDING_PASSWORD:-}
+LANDING_SCOPE=${LANDING_SCOPE:-direct}
+
+# VPN Gate / OpenVPN 落地
+VPNDIR=${VPNDIR:-$SB_DIR/vpngate}
+VPNGATE_SERVICE=${VPNGATE_SERVICE:-openvpn-vpngate.service}
+VPNGATE_SB_SERVICE=${VPNGATE_SB_SERVICE:-sing-box-vpngate.service}
+VPNGATE_USER=${VPNGATE_USER:-vpngate}
+VPNGATE_ROUTE_TABLE=${VPNGATE_ROUTE_TABLE:-100}
+VPNGATE_SOCKS_PORT=${VPNGATE_SOCKS_PORT:-11080}
+VPNGATE_DEV=${VPNGATE_DEV:-vpngate0}
+VPNGATE_ENABLED=${VPNGATE_ENABLED:-false}
+VPNGATE_HOST=${VPNGATE_HOST:-}
+VPNGATE_IP=${VPNGATE_IP:-}
+VPNGATE_COUNTRY=${VPNGATE_COUNTRY:-}
+VPNGATE_SCORE=${VPNGATE_SCORE:-}
+
 # 常量
 SCRIPT_NAME="Sing-Box-Plus 管理脚本"
-SCRIPT_VERSION="v3.2.0"
+SCRIPT_VERSION="v3.3.0"
 REALITY_SERVER=${REALITY_SERVER:-www.microsoft.com}
 REALITY_SERVER_PORT=${REALITY_SERVER_PORT:-443}
 GRPC_SERVICE=${GRPC_SERVICE:-grpc}
@@ -303,8 +326,10 @@ hr(){ printf "${C_DIM}==========================================================
 
 # ===== 基础工具 =====
 info(){ echo -e "[${C_CYAN}信息${C_RESET}] $*"; }
+ok(){ info "$@"; }
 warn(){ echo -e "[${C_YELLOW}警告${C_RESET}] $*"; }
 die(){  echo -e "[${C_RED}错误${C_RESET}] $*" >&2; exit 1; }
+err(){  echo -e "[${C_RED}错误${C_RESET}] $*" >&2; return 1; }
 
 # --- 架构映射：uname -m -> 发行资产名 ---
 arch_map() {
@@ -511,6 +536,38 @@ EOF
 }
 load_warp(){ safe_source_env "$SB_DIR/warp.env" || return 1; }
 
+# ===== 落地出口配置 =====
+save_landing(){
+  ( umask 077; {
+    printf 'ENABLE_LANDING=%q\n' "$ENABLE_LANDING"
+    printf 'LANDING_TYPE=%q\n' "$LANDING_TYPE"
+    printf 'LANDING_HOST=%q\n' "$LANDING_HOST"
+    printf 'LANDING_PORT=%q\n' "$LANDING_PORT"
+    printf 'LANDING_USERNAME=%q\n' "$LANDING_USERNAME"
+    printf 'LANDING_PASSWORD=%q\n' "$LANDING_PASSWORD"
+    printf 'LANDING_SCOPE=%q\n' "$LANDING_SCOPE"
+  } > "$SB_DIR/landing.env" )
+  chmod 600 "$SB_DIR/landing.env" 2>/dev/null || true
+}
+load_landing(){ safe_source_env "$SB_DIR/landing.env" || return 0; }
+
+# ===== VPN Gate 元数据 =====
+save_vpngate_meta(){
+  mkdir -p "$VPNDIR"
+  ( umask 077; {
+    printf 'VPNGATE_ENABLED=%q\n' "$VPNGATE_ENABLED"
+    printf 'VPNGATE_HOST=%q\n' "$VPNGATE_HOST"
+    printf 'VPNGATE_IP=%q\n' "$VPNGATE_IP"
+    printf 'VPNGATE_COUNTRY=%q\n' "$VPNGATE_COUNTRY"
+    printf 'VPNGATE_SCORE=%q\n' "$VPNGATE_SCORE"
+  } > "$VPNDIR/vpngate.env" )
+}
+load_vpngate_meta(){
+  VPNGATE_ENABLED=false
+  VPNGATE_HOST=""; VPNGATE_IP=""; VPNGATE_COUNTRY=""; VPNGATE_SCORE=""
+  safe_source_env "$VPNDIR/vpngate.env" || return 0
+}
+
 # 生成 8 字节十六进制（16 个 hex 字符）
 rand_hex8(){
   if command -v openssl >/dev/null 2>&1; then
@@ -651,7 +708,7 @@ ensure_warpcli_proxy(){
     sleep 1
   done
 
-  if !( ss -lntp 2>/dev/null | grep -q ":${WARP_SOCKS_PORT}\b" || netstat -lntp 2>/dev/null | grep -q ":${WARP_SOCKS_PORT}\b" ); then
+  if ! ( ss -lntp 2>/dev/null | grep -q ":${WARP_SOCKS_PORT}\b" || netstat -lntp 2>/dev/null | grep -q ":${WARP_SOCKS_PORT}\b" ); then
     err "WARP SOCKS5 端口 ${WARP_SOCKS_PORT} 未监听（warp-svc/warp-cli 可能未正常工作）"
     systemctl status warp-svc --no-pager | head -80 || true
     journalctl -u warp-svc -n 120 --no-pager || true
@@ -821,7 +878,7 @@ systemctl enable "${SYSTEMD_SERVICE}" >/dev/null 2>&1 || true
 
 # ===== 写 config.json（使用你提供的稳定配置逻辑） =====
 write_config(){
-  ensure_dirs; load_env || true; load_creds || true; load_ports || true
+  ensure_dirs; load_env || true; load_creds || true; load_ports || true; load_landing || true
   ensure_creds; save_all_ports; mk_cert
   [[ "$ENABLE_WARP" == "true" ]] && ensure_warpcli_proxy
 
@@ -840,10 +897,9 @@ write_config(){
   --argjson PW4 "$PORT_HY2_W" --argjson PW5 "$PORT_VMESS_WS_W" --argjson PW6 "$PORT_HY2_OBFS_W" \
   --argjson PW7 "$PORT_SS2022_W" --argjson PW8 "$PORT_SS_W" --argjson PW9 "$PORT_TUIC_W" \
   --arg ENABLE_WARP "$ENABLE_WARP" \
-  --arg WPRIV "${WARP_PRIVATE_KEY:-}" --arg WPPUB "${WARP_PEER_PUBLIC_KEY:-}" \
-  --arg WHOST "${WARP_ENDPOINT_HOST:-}" --argjson WPORT "${WARP_ENDPOINT_PORT:-0}" \
-  --arg W4 "${WARP_ADDRESS_V4:-}" --arg W6 "${WARP_ADDRESS_V6:-}" \
-  --argjson WR1 "${WARP_RESERVED_1:-0}" --argjson WR2 "${WARP_RESERVED_2:-0}" --argjson WR3 "${WARP_RESERVED_3:-0}" \
+  --arg ENABLE_LANDING "$ENABLE_LANDING" \
+  --arg LHOST "$LANDING_HOST" --argjson LPORT "${LANDING_PORT:-0}" \
+  --arg LUSER "$LANDING_USERNAME" --arg LPASS "$LANDING_PASSWORD" --arg LSCOPE "$LANDING_SCOPE" \
   '
   def inbound_vless($port): {type:"vless", listen:"::", listen_port:$port, users:[{uuid:$UID}], tls:{enabled:true, server_name:$RS, reality:{enabled:true, handshake:{server:$RS, server_port:$RSP}, private_key:$RPR, short_id:[$SID]}}};
   def inbound_vless_flow($port): {type:"vless", listen:"::", listen_port:$port, users:[{uuid:$UID, flow:"xtls-rprx-vision"}], tls:{enabled:true, server_name:$RS, reality:{enabled:true, handshake:{server:$RS, server_port:$RSP}, private_key:$RPR, short_id:[$SID]}}};
@@ -855,9 +911,15 @@ write_config(){
   def inbound_ss($port): {type:"shadowsocks", listen:"::", listen_port:$port, method:"aes-256-gcm", password:$SSPWD};
   def inbound_tuic($port): {type:"tuic", listen:"::", listen_port:$port, users:[{uuid:$TUICUUID, password:$TUICPWD}], congestion_control:"bbr", tls:{enabled:true, certificate_path:$CRT, key_path:$KEY, alpn:["h3"]}};
 
+  def warp_active: ($ENABLE_WARP=="true") and (($WSHOST|length)>0) and ($WSPORT>0);
+  def landing_active: ($ENABLE_LANDING=="true") and (($LHOST|length)>0) and ($LPORT>0);
   def warp_outbound:
     {type:"socks", tag:"warp", server:$WSHOST, server_port:$WSPORT};
-
+  def landing_outbound:
+    ({type:"socks", version:"5", tag:"landing", server:$LHOST, server_port:$LPORT}
+     + (if ($LUSER|length)>0 then {username:$LUSER, password:$LPASS} else {} end));
+  def direct_tags: ["vless-reality","vless-grpcr","trojan-reality","hy2","vmess-ws","hy2-obfs","ss2022","ss","tuic-v5"];
+  def warp_tags: ["vless-reality-warp","vless-grpcr-warp","trojan-reality-warp","hy2-warp","vmess-ws-warp","hy2-obfs-warp","ss2022-warp","ss-warp","tuic-v5-warp"];
 
   {
     log:{level:"info", timestamp:true},
@@ -884,23 +946,24 @@ write_config(){
       (inbound_tuic($PW9) + {tag:"tuic-v5-warp"})
     ],
     outbounds: (
-      if $ENABLE_WARP=="true" and ($WPRIV|length)>0 and ($WHOST|length)>0 then
-        [{type:"direct", tag:"direct"}, {type:"block", tag:"block"}, warp_outbound]
-      else
-        [{type:"direct", tag:"direct"}, {type:"block", tag:"block"}]
-      end
+      [{type:"direct", tag:"direct"}, {type:"block", tag:"block"}]
+      + (if landing_active then [landing_outbound] else [] end)
+      + (if warp_active then [warp_outbound] else [] end)
     ),
-    route: (
-      if $ENABLE_WARP=="true" and ($WPRIV|length)>0 and ($WHOST|length)>0 then
-        { default_domain_resolver:"dns-remote", rules:[
-            { inbound: ["vless-reality-warp","vless-grpcr-warp","trojan-reality-warp","hy2-warp","vmess-ws-warp","hy2-obfs-warp","ss2022-warp","ss-warp","tuic-v5-warp"], outbound:"warp" }
-          ],
-          final:"direct"
-        }
-      else
-        { final:"direct" }
-      end
-    )
+    route: {
+      default_domain_resolver:"dns-remote",
+      rules: (
+        (if landing_active and ($LSCOPE=="direct" or $LSCOPE=="all") then
+          [{inbound:direct_tags, outbound:"landing"}]
+        else [] end)
+        + (if landing_active and ($LSCOPE=="warp" or $LSCOPE=="all") then
+            [{inbound:warp_tags, outbound:"landing"}]
+          elif warp_active then
+            [{inbound:warp_tags, outbound:"warp"}]
+          else [] end)
+      ),
+      final: (if landing_active and $LSCOPE=="all" then "landing" else "direct" end)
+    }
   }' > "$CONF_JSON"
   save_env
 }
@@ -955,7 +1018,7 @@ open_firewall(){
 
 # ===== 分享链接（分组输出 + 提示） =====
 print_links_grouped(){
-  load_env; load_creds; load_ports
+  load_env; load_creds; load_ports; load_landing || true
   local mode="${1:-4}" ip host
   if [[ "$mode" == "6" ]]; then
     ip="$(get_ip6)"
@@ -999,13 +1062,25 @@ JSON
   links_warp+=("ss://$(printf "%s" "aes-256-gcm:${SS_PWD}" | b64enc)@${host}:${PORT_SS_W}#ss-warp")
   links_warp+=("tuic://${UUID}:$(urlenc "${UUID}")@${host}:${PORT_TUIC_W}?congestion_control=bbr&alpn=h3&insecure=1&allowInsecure=1&sni=${REALITY_SERVER}#tuic-v5-warp")
 
+  local direct_label="直连节点（9）" warp_label="WARP 节点（9）"
+  if [[ "$ENABLE_LANDING" == "true" && ( "$LANDING_SCOPE" == "direct" || "$LANDING_SCOPE" == "all" ) ]]; then
+    direct_label="落地节点（9）"
+  fi
+  if [[ "$ENABLE_LANDING" == "true" && ( "$LANDING_SCOPE" == "warp" || "$LANDING_SCOPE" == "all" ) ]]; then
+    warp_label="落地节点（9）"
+  fi
+
   echo -e "${C_BLUE}${C_BOLD}分享链接（18 个）${C_RESET}"
   hr
-  echo -e "${C_CYAN}${C_BOLD}【直连节点（9）】${C_RESET}（vless-reality / vless-grpc-reality / trojan-reality / vmess-ws / hy2 / hy2-obfs / ss2022 / ss / tuic）"
+  echo -e "${C_CYAN}${C_BOLD}【${direct_label}】${C_RESET}（vless-reality / vless-grpc-reality / trojan-reality / vmess-ws / hy2 / hy2-obfs / ss2022 / ss / tuic）"
   for l in "${links_direct[@]}"; do echo "  $l"; done
   hr
-  echo -e "${C_CYAN}${C_BOLD}【WARP 节点（9）】${C_RESET}（同上 9 种，带 -warp）"
-  echo -e "${C_DIM}说明：带 -warp 的 9 个节点走 Cloudflare WARP 出口，流媒体解锁更友好${C_RESET}"
+  echo -e "${C_CYAN}${C_BOLD}【${warp_label}】${C_RESET}（同上 9 种，带 -warp）"
+  if [[ "$ENABLE_LANDING" == "true" ]]; then
+    echo -e "${C_DIM}说明：SOCKS5 落地出口 ${LANDING_HOST}:${LANDING_PORT}，应用范围 ${LANDING_SCOPE}${C_RESET}"
+  else
+    echo -e "${C_DIM}说明：带 -warp 的 9 个节点走 Cloudflare WARP 出口，流媒体解锁更友好${C_RESET}"
+  fi
   echo -e "${C_DIM}提示：TUIC 默认 allowInsecure=1，v2rayN 导入即用${C_RESET}"
   for l in "${links_warp[@]}"; do echo "  $l"; done
   hr
@@ -1027,6 +1102,14 @@ enable_bbr(){
 sb_service_state(){
   systemctl is-active --quiet "${SYSTEMD_SERVICE:-sing-box.service}" && echo -e "${C_GREEN}运行中${C_RESET}" || echo -e "${C_RED}未运行/未安装${C_RESET}"
 }
+landing_state(){
+  load_landing || true
+  if [[ "$ENABLE_LANDING" == "true" && -n "${LANDING_HOST:-}" && -n "${LANDING_PORT:-}" ]]; then
+    echo -e "${C_GREEN}已启用（SOCKS5 ${LANDING_HOST}:${LANDING_PORT}，范围 ${LANDING_SCOPE}）${C_RESET}"
+  else
+    echo -e "${C_DIM}未启用${C_RESET}"
+  fi
+}
 bbr_state(){
   sysctl net.ipv4.tcp_congestion_control 2>/dev/null | grep -q bbr && echo -e "${C_GREEN}已启用 BBR${C_RESET}" || echo -e "${C_RED}未启用 BBR${C_RESET}"
 }
@@ -1035,11 +1118,13 @@ banner(){
   clear >/dev/null 2>&1 || true
   hr
   echo -e " ${C_CYAN}🚀 ${SCRIPT_NAME} ${SCRIPT_VERSION} 🚀${C_RESET}"
-  echo -e "${C_CYAN} 脚本更新地址: https://github.com/Alvin9999-newpac/Sing-Box-Plus${C_RESET}"
+  echo -e "${C_CYAN} 脚本更新地址: https://github.com/chengamki-tech/vps${C_RESET}"
 
   hr
   echo -e "系统加速状态：$(bbr_state)"
   echo -e "Sing-Box 启动状态：$(sb_service_state)"
+  echo -e "SOCKS5 落地状态：$(landing_state)"
+  echo -e "VPN Gate 状态：$(vpngate_state)"
   hr
   echo -e "  ${C_BLUE}1)${C_RESET} 安装/部署（18 节点）"
   echo -e "  ${C_GREEN}2)${C_RESET} 查看分享链接（IPv4）"
@@ -1047,7 +1132,9 @@ banner(){
   echo -e "  ${C_GREEN}3)${C_RESET} 重启服务"
   echo -e "  ${C_GREEN}4)${C_RESET} 一键更换所有端口"
   echo -e "  ${C_GREEN}5)${C_RESET} 一键开启 BBR"
-  echo -e "  ${C_RED}8)${C_RESET} 卸载"
+  echo -e "  ${C_GREEN}7)${C_RESET} 配置/管理 SOCKS5 落地 IP"
+  echo -e "  ${C_GREEN}8)${C_RESET} 配置/管理 VPN Gate 落地"
+  echo -e "  ${C_RED}9)${C_RESET} 卸载"
   echo -e "  ${C_RED}0)${C_RESET} 退出"
   hr
 }
@@ -1080,9 +1167,19 @@ rotate_ports(){
 
 
 uninstall_all(){
+  systemctl disable --now "$VPNGATE_SB_SERVICE" >/dev/null 2>&1 || true
+  systemctl disable --now "$VPNGATE_SERVICE" >/dev/null 2>&1 || true
+  local vpngate_uid
+  vpngate_uid="$(id -u "$VPNGATE_USER" 2>/dev/null || true)"
+  if [[ -n "$vpngate_uid" ]]; then
+    ip rule del uidrange "$vpngate_uid-$vpngate_uid" lookup "$VPNGATE_ROUTE_TABLE" 2>/dev/null || true
+  fi
+  ip route flush table "$VPNGATE_ROUTE_TABLE" >/dev/null 2>&1 || true
+
   systemctl stop "${SYSTEMD_SERVICE}" >/dev/null 2>&1 || true
   systemctl disable "${SYSTEMD_SERVICE}" >/dev/null 2>&1 || true
   rm -f "/etc/systemd/system/${SYSTEMD_SERVICE}"
+  rm -f "/etc/systemd/system/${VPNGATE_SERVICE}" "/etc/systemd/system/${VPNGATE_SB_SERVICE}"
   systemctl daemon-reload
   rm -rf "$SB_DIR"
   echo -e "${C_GREEN}已卸载并清理完成。${C_RESET}"
@@ -1113,6 +1210,508 @@ ensure_installed_or_hint(){
   return 0
 }
 
+landing_apply(){
+  local host="$1" port="$2" user="${3:-}" pass="${4:-}" scope="${5:-direct}"
+  local old_enable="$ENABLE_LANDING" old_type="$LANDING_TYPE" old_host="$LANDING_HOST"
+  local old_port="$LANDING_PORT" old_user="$LANDING_USERNAME" old_pass="$LANDING_PASSWORD" old_scope="$LANDING_SCOPE"
+
+  ENABLE_LANDING=true
+  LANDING_TYPE="socks"
+  LANDING_HOST="$host"
+  LANDING_PORT="$port"
+  LANDING_USERNAME="$user"
+  LANDING_PASSWORD="$pass"
+  LANDING_SCOPE="$scope"
+  save_landing
+
+  if ! write_config; then
+    warn "落地配置写入失败，正在回滚"
+    ENABLE_LANDING="$old_enable"; LANDING_TYPE="$old_type"; LANDING_HOST="$old_host"
+    LANDING_PORT="$old_port"; LANDING_USERNAME="$old_user"; LANDING_PASSWORD="$old_pass"; LANDING_SCOPE="$old_scope"
+    save_landing; write_config >/dev/null 2>&1 || true
+    return 1
+  fi
+
+  if ! ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true "$BIN_PATH" check -c "$CONF_JSON"; then
+    warn "落地配置校验失败，正在回滚原配置"
+    ENABLE_LANDING="$old_enable"; LANDING_TYPE="$old_type"; LANDING_HOST="$old_host"
+    LANDING_PORT="$old_port"; LANDING_USERNAME="$old_user"; LANDING_PASSWORD="$old_pass"; LANDING_SCOPE="$old_scope"
+    save_landing; write_config >/dev/null 2>&1 || true
+    systemctl restart "${SYSTEMD_SERVICE}" >/dev/null 2>&1 || true
+    return 1
+  fi
+
+  if ! systemctl restart "${SYSTEMD_SERVICE}"; then
+    warn "sing-box 重启失败，正在回滚原配置"
+    ENABLE_LANDING="$old_enable"; LANDING_TYPE="$old_type"; LANDING_HOST="$old_host"
+    LANDING_PORT="$old_port"; LANDING_USERNAME="$old_user"; LANDING_PASSWORD="$old_pass"; LANDING_SCOPE="$old_scope"
+    save_landing; write_config >/dev/null 2>&1 || true
+    systemctl restart "${SYSTEMD_SERVICE}" >/dev/null 2>&1 || true
+    return 1
+  fi
+  return 0
+}
+
+configure_landing(){
+  ensure_installed_or_hint || return 0
+  load_landing || true
+
+  local phost pport puser ppass pscope answer ip proxy_host
+
+  echo
+  info "配置 SOCKS5 落地出口。落地侧需要提供 SOCKS5 代理服务。"
+
+  read -rp "落地服务器 IP/域名 (当前 ${LANDING_HOST:-未设置}): " phost || return 0
+  phost="${phost:-$LANDING_HOST}"
+  [[ -n "$phost" ]] || { warn "落地地址不能为空"; return 0; }
+
+  read -rp "落地端口 (当前 ${LANDING_PORT:-未设置}): " pport || return 0
+  pport="${pport:-$LANDING_PORT}"
+  [[ "$pport" =~ ^[0-9]+$ ]] && (( pport >= 1 && pport <= 65535 )) || { warn "端口必须是 1-65535"; return 0; }
+
+  read -rp "用户名 (可空，当前 ${LANDING_USERNAME:-无}): " puser || return 0
+  if [[ -z "$puser" && -n "$LANDING_USERNAME" ]]; then
+    read -rp "留空表示沿用原用户名？[Y/n]: " answer || true
+    [[ "${answer:-Y}" =~ ^[Nn]$ ]] || puser="$LANDING_USERNAME"
+  fi
+  if [[ -n "$puser" ]]; then
+    read -rsp "密码 (直接回车沿用当前值): " ppass || true; echo
+    ppass="${ppass:-$LANDING_PASSWORD}"
+  else
+    ppass=""
+  fi
+
+  echo "应用范围：1) 直连9 走落地；2) WARP9 走落地；3) 全部18 走落地"
+  read -rp "选择 (默认1): " pscope || return 0
+  case "${pscope:-1}" in
+    1|direct) pscope="direct" ;;
+    2|warp) pscope="warp" ;;
+    3|all) pscope="all" ;;
+    *) warn "范围无效"; return 0 ;;
+  esac
+
+  info "正在应用 SOCKS5 落地配置 ..."
+  if ! landing_apply "$phost" "$pport" "$puser" "$ppass" "$pscope"; then
+    read -rp "回车返回..." _ || true
+    return 0
+  fi
+  ok "SOCKS5 落地出口已启用"
+
+  if command -v curl >/dev/null 2>&1; then
+    proxy_host="$(fmt_host_for_uri "$LANDING_HOST")"
+    local curl_proxy="socks5h://${proxy_host}:${LANDING_PORT}"
+    local args=(--silent --show-error --location --max-time 12 --proxy "$curl_proxy")
+    [[ -n "$LANDING_USERNAME" ]] && args+=(--proxy-user "${LANDING_USERNAME}:${LANDING_PASSWORD}")
+    ip="$(curl "${args[@]}" https://api.ipify.org 2>/dev/null || true)"
+    [[ -n "$ip" ]] || ip="$(curl "${args[@]}" https://ifconfig.me 2>/dev/null || true)"
+    if [[ -n "$ip" ]]; then
+      info "落地出口测试 IP: $ip"
+    else
+      warn "已写入配置，但当前无法通过落地代理完成联网测试，请检查落地机防火墙与代理服务"
+    fi
+  fi
+  read -rp "回车返回..." _ || true
+}
+
+disable_landing(){
+  ensure_installed_or_hint || return 0
+  ENABLE_LANDING=false
+  save_landing
+  write_config
+  systemctl restart "${SYSTEMD_SERVICE}" || { warn "sing-box 重启失败"; return 0; }
+  ok "已关闭落地出口，恢复直连/WARP 路由"
+  read -rp "回车返回..." _ || true
+}
+
+test_landing(){
+  ensure_installed_or_hint || return 0
+  load_landing || true
+  [[ "$ENABLE_LANDING" == "true" ]] || { warn "尚未启用落地出口"; read -rp "回车返回..." _ || true; return 0; }
+  command -v curl >/dev/null 2>&1 || { warn "缺少 curl，无法测试"; return 0; }
+
+  local proxy_host proxy ip
+  proxy_host="$(fmt_host_for_uri "$LANDING_HOST")"
+  proxy="socks5h://${proxy_host}:${LANDING_PORT}"
+  local args=(--silent --show-error --location --max-time 12 --proxy "$proxy")
+  [[ -n "$LANDING_USERNAME" ]] && args+=(--proxy-user "${LANDING_USERNAME}:${LANDING_PASSWORD}")
+  ip="$(curl "${args[@]}" https://api.ipify.org 2>/dev/null || true)"
+  [[ -n "$ip" ]] || ip="$(curl "${args[@]}" https://ifconfig.me 2>/dev/null || true)"
+  if [[ -n "$ip" ]]; then
+    info "落地代理可用，当前出口 IP: $ip"
+  else
+    warn "落地代理连接失败，请检查地址、端口、认证信息及落地机防火墙"
+  fi
+  read -rp "回车返回..." _ || true
+}
+
+manage_landing_menu(){
+  while :; do
+    load_landing || true
+    clear >/dev/null 2>&1 || true
+    hr
+    echo -e "${C_BLUE}${C_BOLD}SOCKS5 落地 IP / 链式出口管理${C_RESET}"
+    echo -e "当前状态：$(landing_state)"
+    echo -e "  ${C_GREEN}1)${C_RESET} 配置/修改 SOCKS5 落地代理"
+    echo -e "  ${C_GREEN}2)${C_RESET} 测试 SOCKS5 落地出口 IP"
+    echo -e "  ${C_YELLOW}3)${C_RESET} 关闭 SOCKS5 落地出口"
+    echo -e "  ${C_RED}0)${C_RESET} 返回主菜单"
+    hr
+    read -rp "选择: " answer || return 0
+    case "${answer:-}" in
+      1) configure_landing ;;
+      2) test_landing ;;
+      3) disable_landing ;;
+      0|"") return 0 ;;
+    esac
+  done
+}
+
+# ===== VPN Gate（OpenVPN 落地，不改系统默认路由） =====
+vpngate_state(){
+  load_vpngate_meta || true
+  if systemctl is-active --quiet "$VPNGATE_SERVICE" 2>/dev/null && \
+     systemctl is-active --quiet "$VPNGATE_SB_SERVICE" 2>/dev/null; then
+    echo -e "${C_GREEN}运行中（${VPNGATE_COUNTRY:-未知} ${VPNGATE_HOST:-} / ${VPNGATE_IP:-}）${C_RESET}"
+  else
+    echo -e "${C_DIM}未运行${C_RESET}"
+  fi
+}
+
+vpngate_ensure_user(){
+  id "$VPNGATE_USER" >/dev/null 2>&1 && return 0
+  local shell="/sbin/nologin"
+  command -v nologin >/dev/null 2>&1 && shell="$(command -v nologin)"
+  useradd --system --no-create-home --shell "$shell" "$VPNGATE_USER" 2>/dev/null || \
+    useradd -r -s "$shell" "$VPNGATE_USER"
+}
+
+vpngate_fetch_servers(){
+  mkdir -p "$VPNDIR"
+  info "正在获取 VPN Gate 节点列表 ..."
+  curl -fsSL --retry 3 --connect-timeout 8 -A 'Mozilla/5.0' \
+    'https://www.vpngate.net/api/iphone/' > "$VPNDIR/servers.csv"
+  [[ -s "$VPNDIR/servers.csv" ]] || { warn "VPN Gate 节点列表为空"; return 1; }
+}
+
+vpngate_select_server(){
+  local pattern="${1:-JP}" csv="$VPNDIR/servers.csv" selected count
+  count="$(awk -F, -v p="$pattern" '
+    NR>2 && ($NF != "") && (index(tolower($6),tolower(p))>0 || toupper($7)==toupper(p) || index(tolower($1),tolower(p))>0 || index($2,p)>0) {n++}
+    END{print n+0}
+  ' "$csv")"
+  if (( count == 0 )); then
+    warn "没有找到匹配“${pattern}”的 VPN Gate 节点"
+    return 1
+  fi
+
+  selected="$(awk -F, -v p="$pattern" '
+    NR>2 && ($NF != "") && (index(tolower($6),tolower(p))>0 || toupper($7)==toupper(p) || index(tolower($1),tolower(p))>0 || index($2,p)>0) {print}
+  ' "$csv" | sort -t, -k3,3nr | sed -n '1p')"
+
+  VPNGATE_HOST="$(printf '%s' "$selected" | awk -F, '{gsub(/\r/,"",$1); print $1}')"
+  VPNGATE_IP="$(printf '%s' "$selected" | awk -F, '{gsub(/\r/,"",$2); print $2}')"
+  VPNGATE_SCORE="$(printf '%s' "$selected" | awk -F, '{gsub(/\r/,"",$3); print $3}')"
+  VPNGATE_COUNTRY="$(printf '%s' "$selected" | awk -F, '{gsub(/\r/,"",$6); print $6}')"
+  printf '%s' "$selected" | awk -F, '{gsub(/\r/,"",$NF); print $NF}' > "$VPNDIR/server.b64"
+  [[ -s "$VPNDIR/server.b64" ]] || { warn "未能提取 VPN Gate OpenVPN 配置"; return 1; }
+}
+
+vpngate_decode_and_sanitize(){
+  local raw="$VPNDIR/server.ovpn" ovpn="$VPNDIR/current.ovpn"
+  if ! base64 -d < "$VPNDIR/server.b64" > "$raw" 2>/dev/null; then
+    warn "VPN Gate OpenVPN 配置解码失败"
+    return 1
+  fi
+  grep -qE '^[[:space:]]*remote[[:space:]]+' "$raw" || { warn "OpenVPN 配置缺少 remote"; return 1; }
+
+  # VPN Gate 配置来自公网，剥离可执行/路由覆盖指令，再追加受控策略路由。
+  VPNDIR="$VPNDIR" awk -v dev="$VPNGATE_DEV" '
+    BEGIN {
+      print "client"
+      print "dev " dev
+      print "route-nopull"
+      print "nobind"
+      print "persist-key"
+      print "persist-tun"
+      print "resolv-retry infinite"
+      print "remote-cert-tls server"
+      print "auth-nocache"
+      print "verb 3"
+    }
+    {
+      low=tolower($0)
+      if (low ~ /^[[:space:]]*(dev|up|down|route-up|route-pre-down|plugin|script-security|daemon|log|log-append|writepid|user|group|chroot|cd|config|askpass|auth-user-pass|management|route|redirect-gateway|pull-filter|iproute|setenv[[:space:]]+opt)[[:space:]]/) next
+      print
+    }
+    END {
+      print "data-ciphers AES-128-CBC:AES-256-CBC:AES-128-GCM:AES-256-GCM"
+      print "data-ciphers-fallback AES-128-CBC"
+      print "script-security 2"
+      print "route-up " ENVIRON["VPNDIR"] "/route-up.sh"
+      print "down " ENVIRON["VPNDIR"] "/route-down.sh"
+    }
+  ' "$raw" > "$ovpn"
+  chmod 600 "$ovpn"
+}
+
+vpngate_write_route_scripts(){
+  cat > "$VPNDIR/route-up.sh" <<EOF
+#!/usr/bin/env bash
+set -e
+uid="\$(id -u $VPNGATE_USER)"
+dev="\${dev:-$VPNGATE_DEV}"
+table="$VPNGATE_ROUTE_TABLE"
+ip rule del uidrange "\$uid-\$uid" lookup "\$table" 2>/dev/null || true
+ip rule add uidrange "\$uid-\$uid" lookup "\$table" priority 100
+ip route replace default dev "\$dev" table "\$table"
+if command -v ip6tables >/dev/null 2>&1; then
+  ip6tables -C OUTPUT -m owner --uid-owner "\$uid" -j REJECT 2>/dev/null || \
+    ip6tables -I OUTPUT 1 -m owner --uid-owner "\$uid" -j REJECT 2>/dev/null || true
+fi
+EOF
+  cat > "$VPNDIR/route-down.sh" <<EOF
+#!/usr/bin/env bash
+set +e
+uid="\$(id -u $VPNGATE_USER 2>/dev/null || echo 0)"
+table="$VPNGATE_ROUTE_TABLE"
+ip rule del uidrange "\$uid-\$uid" lookup "\$table" 2>/dev/null || true
+ip route flush table "\$table" 2>/dev/null || true
+if command -v ip6tables >/dev/null 2>&1; then
+  while ip6tables -D OUTPUT -m owner --uid-owner "\$uid" -j REJECT 2>/dev/null; do :; done
+fi
+EOF
+  chmod 700 "$VPNDIR/route-up.sh" "$VPNDIR/route-down.sh"
+}
+
+vpngate_write_singbox_config(){
+  mkdir -p "$VPNDIR/data"
+  jq -n --argjson port "$VPNGATE_SOCKS_PORT" '
+    {
+      log:{level:"warn", timestamp:true},
+      dns:{servers:[{address:"1.1.1.1",detour:"direct"},{address:"8.8.8.8",detour:"direct"}],strategy:"prefer_ipv4"},
+      inbounds:[{type:"mixed", tag:"mixed-in", listen:"127.0.0.1", listen_port:$port}],
+      outbounds:[{type:"direct", tag:"direct"}],
+      route:{final:"direct"}
+    }
+  ' > "$VPNDIR/sing-box.json"
+  chmod 644 "$VPNDIR/sing-box.json"
+  local vpngate_group
+  vpngate_group="$(id -gn "$VPNGATE_USER" 2>/dev/null || printf '%s' "$VPNGATE_USER")"
+  chown -R "$VPNGATE_USER:$vpngate_group" "$VPNDIR/data"
+}
+
+vpngate_write_services(){
+  local ovpn_bin
+  ovpn_bin="$(command -v openvpn)" || { warn "openvpn 未安装"; return 1; }
+
+  cat > "/etc/systemd/system/$VPNGATE_SERVICE" <<EOF
+[Unit]
+Description=VPN Gate OpenVPN Landing
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=$ovpn_bin --config $VPNDIR/current.ovpn
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=1048576
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_ADMIN
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  cat > "/etc/systemd/system/$VPNGATE_SB_SERVICE" <<EOF
+[Unit]
+Description=Local SOCKS5 for VPN Gate Landing
+After=network-online.target $VPNGATE_SERVICE
+Wants=network-online.target
+Requires=$VPNGATE_SERVICE
+
+[Service]
+Type=simple
+User=$VPNGATE_USER
+Group=$VPNGATE_USER
+ExecStart=$BIN_PATH run -c $VPNDIR/sing-box.json -D $VPNDIR/data
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=$VPNDIR/data
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  systemctl daemon-reload
+}
+
+vpngate_wait_tunnel(){
+  local i
+  for i in {1..60}; do
+    if ip link show "$VPNGATE_DEV" >/dev/null 2>&1 && \
+       ip -4 addr show dev "$VPNGATE_DEV" 2>/dev/null | grep -q 'inet ' && \
+       ip rule show 2>/dev/null | grep -q "lookup $VPNGATE_ROUTE_TABLE"; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+vpngate_local_socks_test(){
+  local ip=""
+  ip="$(curl -fsSL --max-time 20 --proxy "socks5h://127.0.0.1:${VPNGATE_SOCKS_PORT}" https://api.ipify.org 2>/dev/null || true)"
+  [[ -n "$ip" ]] || ip="$(curl -fsSL --max-time 20 --proxy "socks5h://127.0.0.1:${VPNGATE_SOCKS_PORT}" https://ifconfig.me 2>/dev/null || true)"
+  printf '%s' "$ip"
+}
+
+vpngate_scope_prompt(){
+  local scope
+  echo "应用范围：1) 直连9 走 VPN Gate；2) WARP9 走 VPN Gate；3) 全部18 走 VPN Gate"
+  read -rp "选择 (默认1): " scope || return 1
+  case "${scope:-1}" in
+    1|direct) printf '%s' "direct" ;;
+    2|warp) printf '%s' "warp" ;;
+    3|all) printf '%s' "all" ;;
+    *) return 1 ;;
+  esac
+}
+
+configure_vpngate(){
+  ensure_installed_or_hint || return 0
+  [[ "$EUID" -eq 0 ]] || { warn "配置 VPN Gate 需要 root 权限"; return 0; }
+
+  local pattern scope ip
+  ensure_deps openvpn || { warn "OpenVPN 安装失败"; return 0; }
+  vpngate_ensure_user || { warn "创建 VPN Gate 系统用户失败"; return 0; }
+  vpngate_fetch_servers || { read -rp "回车返回..." _ || true; return 0; }
+
+  read -rp "国家/地区代码或关键词（默认 JP，例如 JP / Japan / 日本）: " pattern || return 0
+  pattern="${pattern:-JP}"
+  vpngate_select_server "$pattern" || { read -rp "回车返回..." _ || true; return 0; }
+  vpngate_decode_and_sanitize || { read -rp "回车返回..." _ || true; return 0; }
+
+  scope="$(vpngate_scope_prompt)" || { warn "范围无效"; return 0; }
+  info "已选择：${VPNGATE_COUNTRY} ${VPNGATE_HOST} (${VPNGATE_IP}) score=${VPNGATE_SCORE}"
+
+  systemctl disable --now "$VPNGATE_SB_SERVICE" >/dev/null 2>&1 || true
+  systemctl disable --now "$VPNGATE_SERVICE" >/dev/null 2>&1 || true
+  vpngate_write_route_scripts
+  vpngate_write_singbox_config
+  vpngate_write_services || { read -rp "回车返回..." _ || true; return 0; }
+
+  systemctl enable --now "$VPNGATE_SERVICE" >/dev/null 2>&1 || true
+  if ! vpngate_wait_tunnel; then
+    warn "VPN Gate OpenVPN 隧道未就绪"
+    journalctl -u "$VPNGATE_SERVICE" -n 80 --no-pager || true
+    systemctl stop "$VPNGATE_SERVICE" >/dev/null 2>&1 || true
+    read -rp "回车返回..." _ || true
+    return 0
+  fi
+
+  systemctl enable --now "$VPNGATE_SB_SERVICE" >/dev/null 2>&1 || true
+  local i ready=0
+  for i in {1..20}; do
+    if ss -lnt 2>/dev/null | grep -q ":${VPNGATE_SOCKS_PORT}\\b"; then ready=1; break; fi
+    sleep 1
+  done
+  if (( ready == 0 )); then
+    warn "VPN Gate 本地 SOCKS5 未启动"
+    journalctl -u "$VPNGATE_SB_SERVICE" -n 80 --no-pager || true
+    systemctl stop "$VPNGATE_SB_SERVICE" "$VPNGATE_SERVICE" >/dev/null 2>&1 || true
+    read -rp "回车返回..." _ || true
+    return 0
+  fi
+
+  ip="$(vpngate_local_socks_test)"
+  if [[ -z "$ip" ]]; then
+    warn "VPN Gate 隧道已建立，但 SOCKS5 联网测试失败"
+    journalctl -u "$VPNGATE_SERVICE" -u "$VPNGATE_SB_SERVICE" -n 120 --no-pager || true
+    systemctl stop "$VPNGATE_SB_SERVICE" "$VPNGATE_SERVICE" >/dev/null 2>&1 || true
+    read -rp "回车返回..." _ || true
+    return 0
+  fi
+
+  if ! landing_apply "127.0.0.1" "$VPNGATE_SOCKS_PORT" "" "" "$scope"; then
+    warn "VPN Gate 已连通，但写入入口 sing-box 失败"
+    read -rp "回车返回..." _ || true
+    return 0
+  fi
+
+  VPNGATE_ENABLED=true
+  save_vpngate_meta
+  ok "VPN Gate 落地已启用：${VPNGATE_COUNTRY} ${VPNGATE_IP}，出口测试 IP: $ip"
+  read -rp "回车返回..." _ || true
+}
+
+test_vpngate(){
+  load_vpngate_meta || true
+  local ip
+  systemctl is-active --quiet "$VPNGATE_SERVICE" || { warn "VPN Gate OpenVPN 未运行"; read -rp "回车返回..." _ || true; return 0; }
+  systemctl is-active --quiet "$VPNGATE_SB_SERVICE" || { warn "VPN Gate 本地 SOCKS5 未运行"; read -rp "回车返回..." _ || true; return 0; }
+  ip="$(vpngate_local_socks_test)"
+  if [[ -n "$ip" ]]; then
+    info "VPN Gate 可用：${VPNGATE_COUNTRY:-} ${VPNGATE_IP:-}，实际出口 IP: $ip"
+  else
+    warn "VPN Gate 测试失败"
+    journalctl -u "$VPNGATE_SERVICE" -u "$VPNGATE_SB_SERVICE" -n 80 --no-pager || true
+  fi
+  read -rp "回车返回..." _ || true
+}
+
+disable_vpngate(){
+  local uid
+  systemctl disable --now "$VPNGATE_SB_SERVICE" >/dev/null 2>&1 || true
+  systemctl disable --now "$VPNGATE_SERVICE" >/dev/null 2>&1 || true
+  uid="$(id -u "$VPNGATE_USER" 2>/dev/null || true)"
+  [[ -n "$uid" ]] && ip rule del uidrange "$uid-$uid" lookup "$VPNGATE_ROUTE_TABLE" 2>/dev/null || true
+  ip route flush table "$VPNGATE_ROUTE_TABLE" >/dev/null 2>&1 || true
+
+  load_landing || true
+  if [[ "$ENABLE_LANDING" == "true" && "$LANDING_HOST" == "127.0.0.1" && "$LANDING_PORT" == "$VPNGATE_SOCKS_PORT" ]]; then
+    ENABLE_LANDING=false
+    save_landing
+    if write_config && ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true "$BIN_PATH" check -c "$CONF_JSON"; then
+      systemctl restart "$SYSTEMD_SERVICE" >/dev/null 2>&1 || true
+    fi
+  fi
+
+  VPNGATE_ENABLED=false
+  save_vpngate_meta
+  ok "VPN Gate 落地已关闭"
+  read -rp "回车返回..." _ || true
+}
+
+manage_vpngate_menu(){
+  local answer
+  while :; do
+    clear >/dev/null 2>&1 || true
+    hr
+    echo -e "${C_BLUE}${C_BOLD}VPN Gate / OpenVPN 落地管理${C_RESET}"
+    echo -e "当前状态：$(vpngate_state)"
+    echo -e "${C_DIM}说明：VPN Gate 节点为 OpenVPN，不是 SOCKS5。脚本用独立用户 + 策略路由，仅让落地进程走隧道。${C_RESET}"
+    echo -e "  ${C_GREEN}1)${C_RESET} 选择国家/地区并连接 VPN Gate"
+    echo -e "  ${C_GREEN}2)${C_RESET} 测试当前 VPN Gate 出口"
+    echo -e "  ${C_YELLOW}3)${C_RESET} 关闭并清理 VPN Gate 落地"
+    echo -e "  ${C_RED}0)${C_RESET} 返回主菜单"
+    hr
+    read -rp "选择: " answer || return 0
+    case "${answer:-}" in
+      1) configure_vpngate ;;
+      2) test_vpngate ;;
+      3) disable_vpngate ;;
+      0|"") return 0 ;;
+    esac
+  done
+}
+
 # ===== 菜单 =====
 menu(){
   banner
@@ -1138,11 +1737,15 @@ menu(){
     3) if ensure_installed_or_hint; then restart_service; fi; read -rp "回车返回..." _ || true; menu ;;
    4) if ensure_installed_or_hint; then rotate_ports; fi; menu ;;
     5) enable_bbr; read -rp "回车返回..." _ || true; menu ;;
-    8) uninstall_all ;; # 直接退出
+    7) if ensure_installed_or_hint; then manage_landing_menu; fi; menu ;;
+    8) if ensure_installed_or_hint; then manage_vpngate_menu; fi; menu ;;
+    9) uninstall_all ;; # 直接退出
     0) exit 0 ;;
     *) menu ;;
   esac
 }
 
 # ===== 入口 =====
-menu
+if [[ "${BASH_SOURCE[0]:-}" == "$0" ]]; then
+  menu
+fi
