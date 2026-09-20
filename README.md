@@ -8,6 +8,7 @@
 * ✅ **更换端口**后自动重写配置与放行
 * ✅ 分享链接分组打印（直连 9 / WARP 9），导入即用
 * ✅ WARP 节点，将服务器 IP“变身”为 Cloudflare 的中性出口，Netflix/Disney+/YouTube 等流媒体解锁
+* ✅ 支持 **VPN Gate OpenVPN 落地**：自动获取节点、按国家选择，并通过策略路由仅让落地进程走 VPN
 
 ---
 
@@ -44,12 +45,12 @@
 ## 📥 一键安装 / 更新脚本
 
 ```bash
-wget -O sing-box-plus.sh https://raw.githubusercontent.com/Alvin9999-newpac/Sing-Box-Plus/main/sing-box-plus.sh  && chmod +x sing-box-plus.sh && bash sing-box-plus.sh
+wget -O sing-box-plus.sh https://raw.githubusercontent.com/chengamki-tech/vps/main/sing-box-plus.sh  && chmod +x sing-box-plus.sh && bash sing-box-plus.sh
 ```
 或者
 
 ```bash
-curl -fsSL -o sing-box-plus.sh https://raw.githubusercontent.com/Alvin9999-newpac/Sing-Box-Plus/main/sing-box-plus.sh  && chmod +x sing-box-plus.sh && bash sing-box-plus.sh
+curl -fsSL -o sing-box-plus.sh https://raw.githubusercontent.com/chengamki-tech/vps/main/sing-box-plus.sh  && chmod +x sing-box-plus.sh && bash sing-box-plus.sh
 
 ```
 
@@ -60,8 +61,8 @@ curl -fsSL -o sing-box-plus.sh https://raw.githubusercontent.com/Alvin9999-newpa
 ## 🧭 功能菜单
 
 ```text
- 🚀 Sing-Box-Plus 管理脚本 v3.2.0 🚀
- 脚本更新地址: https://github.com/Alvin9999-newpac/Sing-Box-Plus
+ 🚀 Sing-Box-Plus 管理脚本 v3.3.0 🚀
+ 脚本更新地址: https://github.com/chengamki-tech/vps
 =============================================================
 系统加速状态：已启用 / 未启用 BBR
 Sing-Box 启动状态：运行中 / 未运行 / 未安装
@@ -72,7 +73,9 @@ Sing-Box 启动状态：运行中 / 未运行 / 未安装
   3) 重启服务
   4) 一键更换所有端口
   5) 一键开启 BBR
-  8) 卸载
+  7) 配置/管理 SOCKS5 落地 IP
+  8) 配置/管理 VPN Gate 落地
+  9) 卸载
   0) 退出
 =============================================================
 ```
@@ -83,6 +86,7 @@ Sing-Box 启动状态：运行中 / 未运行 / 未安装
 
 | 版本    | 日期     | 变更 |
 |--------|----------|------|
+| v3.3.0 | 2026-09 | - 新增 SOCKS5 落地 IP，以及 VPN Gate OpenVPN 落地（自动选节点、独立用户策略路由、IPv6 泄漏防护）。 |
 | v3.2.0 | 2026-01 | - WARP采用官方 warp-cli，更高兼容性。 |
 
 
@@ -120,7 +124,19 @@ Sing-Box 启动状态：运行中 / 未运行 / 未安装
 4. **开启 BBR** → `5) 一键开启 BBR`
    * 自动检测并设置 `fq + bbr`，提高拥塞控制与队列质量
 5. **重启服务** → `3) 重启服务`
-6. **卸载** → `8) 卸载`
+6. **配置 SOCKS5 落地 IP（可选）** → `7) 配置/管理 SOCKS5 落地 IP`
+   * 落地侧需要先提供 **SOCKS5 代理**，仅填写一个裸 IP 无法直接作为出口
+   * 输入地址、端口、用户名/密码，并选择应用范围：
+     - `直连9`：原有 WARP 9 不受影响（推荐）
+     - `WARP9`：原直连 9 不受影响
+     - `全部18`：18 个节点统一从落地 IP 出去
+   * 保存后脚本会自动重写配置、校验、重启，并尝试请求 `api.ipify.org` 显示实际出口 IP
+7. **配置 VPN Gate 落地（可选）** → `8) 配置/管理 VPN Gate 落地`
+   * 输入国家/地区代码或关键词，例如 `JP`、`Japan`、`KR`；留空默认 `JP`
+   * 脚本从 VPN Gate 公共 API 选择评分最高的匹配节点，自动下载 OpenVPN 配置
+   * 使用独立系统用户和策略路由，只让 VPN Gate 本地 SOCKS5 的流量进入 OpenVPN，不改入口 VPS 默认路由
+   * 可选择 `直连9`、`WARP9` 或 `全部18` 使用 VPN Gate 出口
+8. **卸载** → `9) 卸载`
    * 停止服务、移除 systemd、保留数据目录（如需全清自行删除 `/opt/sing-box`）
 
 ---
@@ -201,7 +217,7 @@ journalctl -u sing-box.service --no-pager -n 100
 
 ## 🧹 卸载
 
-在菜单选择 `8) 卸载`。若需​**彻底清理**​：
+在菜单选择 `9) 卸载`。若需​**彻底清理**​：
 
 <pre class="overflow-visible!" data-start="5672" data-end="5868"><div class="contain-inline-size rounded-2xl relative bg-token-sidebar-surface-primary"><div class="sticky top-9"><div class="absolute end-0 bottom-0 flex h-9 items-center pe-2"><div class="bg-token-bg-elevated-secondary text-token-text-secondary flex items-center gap-4 rounded-sm px-2 font-sans text-xs"></div></div></div><div class="overflow-y-auto p-4" dir="ltr"><code class="whitespace-pre! language-bash"><span><span>systemctl stop sing-box.service
 systemctl </span><span>disable</span><span> sing-box.service
@@ -212,6 +228,55 @@ systemctl daemon-reload
 </span></span></code></div></div></pre>
 
 ---
+
+## 🌍 SOCKS5 落地 IP / 链式出口
+
+启用后数据路径为：
+
+```text
+客户端 -> 入口 VPS（现有 18 个入站节点）-> 落地 SOCKS5 代理 -> 目标网站
+```
+
+适用前提：
+
+* 落地服务器上已经运行 SOCKS5 代理，并允许入口 VPS 访问。
+* 落地机及云安全组已放行对应代理端口。
+* 建议在落地侧仅允许入口 VPS 的公网 IP 连接，避免代理端口裸露给全网。
+* 脚本只负责把目标流量转发到落地代理；不会自动在裸 VPS 上创建代理服务。
+
+菜单中的 `7) 配置/管理 SOCKS5 落地 IP` 支持：
+
+1. 配置或修改 SOCKS5 落地代理
+2. 测试 SOCKS5 落地代理实际出口 IP
+3. 关闭 SOCKS5 落地出口，恢复原始路由
+
+落地凭据保存在 `/opt/sing-box/landing.env`，文件权限会自动设为 `600`。
+
+## 🛰 VPN Gate 落地（OpenVPN）
+
+VPN Gate 提供的是 OpenVPN 配置，不是 SOCKS5 服务。脚本会把它包装成本地 SOCKS5 落地：
+
+```text
+客户端 -> 入口 VPS 的 sing-box -> 127.0.0.1:11080 本地 SOCKS5
+       -> VPN Gate OpenVPN 隧道（独立 Linux 用户 + 策略路由）-> 目标网站
+```
+
+特点：
+
+* 自动从 `https://www.vpngate.net/api/iphone/` 获取当前节点列表
+* 支持按国家/地区代码或关键词选择，默认优先选择日本节点
+* 只修改 `vpngate` 系统用户的策略路由，不影响入口 VPS 的 SSH 和系统默认路由
+* VPN Gate 仅为公共免费节点，稳定性和隐私保障有限，不适合处理敏感流量
+* 手动 SOCKS5 落地和 VPN Gate 落地两种菜单模式同时保留，配置时按需切换入口侧使用的出口
+
+VPN Gate 相关文件：
+
+| 路径 | 说明 |
+| --- | --- |
+| `/opt/sing-box/vpngate/current.ovpn` | 当前 VPN Gate OpenVPN 配置 |
+| `/opt/sing-box/vpngate/sing-box.json` | 本地 SOCKS5 服务配置 |
+| `/opt/sing-box/vpngate/route-up.sh` | 建立独立路由表和用户规则 |
+| `/opt/sing-box/vpngate/route-down.sh` | 清理策略路由和 IPv6 泄漏防护 |
 
 ## ⚙️ 进阶：自定义（可选）
 
@@ -225,4 +290,4 @@ systemctl daemon-reload
 
 ***
 
-有问题可以[发帖](https://github.com/Alvin9999-newpac/Sing-Box-Plus/issues)反馈，或者发邮件到海外邮箱rebeccalane27@gmail.com进行反馈。
+有问题可以[发帖](https://github.com/chengamki-tech/vps/issues)反馈，或者发邮件到海外邮箱rebeccalane27@gmail.com进行反馈。
